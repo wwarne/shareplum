@@ -4,7 +4,7 @@ from lxml import etree
 import requests
 from datetime import datetime
 import re
-
+import os
 from requests_toolbelt import SSLAdapter
 
 
@@ -53,9 +53,8 @@ class Office365(object):
                 </t:RequestSecurityToken>
               </s:Body>
             </s:Envelope>""" % (username, password, self.share_point_site)
-        headers = {'accept': 'application/json;odata=verbose'}
 
-        response = requests.post(url, body, headers=headers)
+        response = requests.post(url, body)
 
         xmldoc = etree.fromstring(response.content)
 
@@ -104,6 +103,8 @@ class Site(object):
 
         self.last_request = None
 
+        self.xml_headers = {'accept': 'application/atom+xml'}
+
         self._services_url = {'Alerts': '/_vti_bin/Alerts.asmx',
                               'Authentication': '/_vti_bin/Authentication.asmx',
                               'Copy': '/_vti_bin/Copy.asmx',
@@ -122,7 +123,10 @@ class Site(object):
                               'Versions': '/_vti_bin/Versions.asmx',
                               'Views': '/_vti_bin/Views.asmx',
                               'WebPartPages': '/_vti_bin/WebPartPages.asmx',
-                              'Webs': '/_vti_bin/Webs.asmx'
+                              'Webs': '/_vti_bin/Webs.asmx',
+                              'RequestDigest': '/_api/contextinfo',
+                              'RestWeb': '/_api/web/'
+
                               }
 
         self.users = self.GetUsers()
@@ -131,10 +135,25 @@ class Site(object):
         """Full SharePoint Service URL"""
         return ''.join([self.site_url, self._services_url[service]])
 
+
     def _headers(self, soapaction):
         headers = {"Content-Type": "text/xml; charset=UTF-8",
                    "SOAPAction": "http://schemas.microsoft.com/sharepoint/soap/" + soapaction}
         return headers
+
+    def _get_request_digest(self):
+        """
+        Grabs the request digest which needs to be added for authentication on every rest api request
+        """
+        response = self._session.post(url=self._url('RequestDigest'),
+                                      headers=self.xml_headers,
+                                      verify=self._verify_ssl,
+                                      timeout=self.timeout)
+        xmlObj = etree.fromstring(response.text.encode('utf-8'), parser=etree.XMLParser(huge_tree=self.huge_tree))
+
+        if response.status_code == 200:
+            return xmlObj.find("{http://schemas.microsoft.com/ado/2007/08/dataservices}FormDigestValue").text
+        raise Exception("Error Authenticating or getting Request Digest ")
 
     # This is part of List but seems awkward under the List Method
     def AddList(self, listName, description, templateID):
@@ -198,7 +217,6 @@ class Site(object):
                                       timeout=self.timeout)
 
         # Parse Request
-        print(response)
         if response == 200:
             return response.text
         else:
@@ -302,15 +320,129 @@ class Site(object):
         """
         return _List(self._session, listName, self._url, self._verify_ssl, self.users, self.huge_tree, self.timeout, exclude_hidden_fields=exclude_hidden_fields)
 
+    def Documents(self, folder):
+        """
+        Wrapper for interacting with Share Point Rest Api for Document Library Content
+        """
+        return _Documents(self._session, folder, self._url, self._verify_ssl, self.timeout, self.huge_tree,  self._get_request_digest())
+
+
+class _Documents(object):
+    """
+    Wrapper for interacting with Share Point Rest Api for Document Library Content
+    """
+    def __init__(self, session, folder, url, verify_ssl, timeout, huge_tree, request_digest):
+        self._session = session
+        self.timeout = timeout
+        self.folder = folder
+        self._url = url
+        self._verify_ssl = verify_ssl
+        self.huge_tree = huge_tree
+        self.request_digest = request_digest
+        self.rest_api_headers = {'accept': 'application/atom+xml',  'X-RequestDigest': self.request_digest}
+
+        self.name_spaces ={'atom': 'http://www.w3.org/2005/Atom',
+                           'meta': 'http://schemas.microsoft.com/ado/2007/08/dataservices/metadata',
+                           'dataservices': 'http://schemas.microsoft.com/ado/2007/08/dataservices',
+                           'inline': 'http://schemas.microsoft.com/ado/2007/08/dataservices/metadata'}
+
+    def GetSubFolders(self):
+        """
+        Get's sub folders of initialized Folder in Document Object
+        """
+        response = self._session.get("%sGetFolderByServerRelativeUrl('%s')?$expand=Folders" % (self._url('RestWeb'), self.folder),
+                                      headers=self.rest_api_headers,
+                                      verify=self._verify_ssl,
+                                      timeout=self.timeout)
+        if response.status_code == 200:
+            xmlObj = etree.fromstring(response.text.encode('utf-8'), parser=etree.XMLParser(huge_tree=self.huge_tree))
+            data = []
+            ns = self.name_spaces
+            for child in xmlObj.findall("atom:link/inline:inline/atom:feed/atom:entry/atom:content/meta:properties", ns):
+                name = child.find("dataservices:Name", ns).text
+                folder_url = child.find("dataservices:ServerRelativeUrl", ns).text
+                data.append({"folderName": name, "folderUrl": folder_url})
+            return data
+        else:
+            return response
+
+    def GetDocumentFolderFileNames(self, folder_name=None):
+        """
+        Get all of the file names in a folder
+        :param folder_name: Share Point Folder name or Relative url of the Share Point folder
+        :return: Dict of File names and File's Relative url's or request response if it fails
+        """
+        folder_to_use = folder_name
+        if folder_name is None: folder_to_use = self.folder
+        response = self._session.get("%sGetFolderByServerRelativeUrl('%s')/Files" % (self._url('RestWeb'), folder_to_use),
+                                      headers=self.rest_api_headers,
+                                      verify=self._verify_ssl,
+                                      timeout=self.timeout)
+        if response.status_code == 200:
+            xmlObj = etree.fromstring(response.text.encode('utf-8'), parser=etree.XMLParser(huge_tree=self.huge_tree))
+            data = []
+            ns = self.name_spaces
+            for child in xmlObj.findall("atom:entry/atom:content/meta:properties", ns):
+                    name = child.find("dataservices:Name", ns).text
+                    url = child.find("dataservices:ServerRelativeUrl", ns).text
+                    data.append({"fileName": name, "url": url})
+            return data
+        else:
+            return response
+
+    def GetFileByRelativeUrl(self, relative_url, file_name, directory_to_save):
+        """
+        Down loads a single file
+        :param relative_url: Share Point File relative url
+        :param file_name: The name the file is saved as in Share Point
+        :param directory_to_save: Local Directory to save the file to
+        :return:
+        """
+        response = self._session.get(
+            "%sGetFileByServerRelativeUrl('%s')/$value" % (self._url('RestWeb'), relative_url),
+            headers=self.rest_api_headers,
+            verify=self._verify_ssl,
+            timeout=self.timeout)
+        if response.status_code == 200:
+            if not os.path.exists(directory_to_save):
+                os.makedirs(directory_to_save)
+            with open(os.path.join(directory_to_save, file_name), "wb") as output:
+                output.write(response.content)
+            return os.path.join(directory_to_save, file_name)
+        return response
+
+    def GetAllFilesInFolder(self, directory_to_save, include_sub_folders=False):
+        """
+        Downloads all of the files in the folder
+        :param directory_to_save: Local directory to save the files to
+        :param include_sub_folders: If you would also like to download sub folders and mirror the file structure of the Share Point Document library.
+        :return:
+        """
+        if include_sub_folders:
+            sub_folders = self.GetSubFolders()
+            sub_folders.append({"folderName": self.folder, "folderUrl": self.folder})
+            for folder in sub_folders:
+                files_in_folder = self.GetDocumentFolderFileNames(folder['folderUrl'])
+                for file in files_in_folder:
+                    final_save_location = os.path.join(directory_to_save, folder['folderName'])
+                    if folder['folderName'] == self.folder: final_save_location = directory_to_save
+                    self.GetFileByRelativeUrl(file['url'], file['fileName'], final_save_location)
+            return directory_to_save
+        list_of_file_names = self.GetDocumentFolderFileNames()
+        if not list_of_file_names:
+            return "Not valid folder or No Files in the folder."
+        for file_in_sharepoint in list_of_file_names:
+            self.GetFileByRelativeUrl(file_in_sharepoint['url'], file_in_sharepoint['fileName'], directory_to_save)
+        return directory_to_save
 
 class _List(object):
-    """Sharepoint Lists Web Service
+    """Sharepoint Lists Web Serviceuntitled:Untitled-1
        Microsoft Developer Network:
        The Lists Web service provides methods for working
        with SharePoint lists, content types, list items, and files.
     """
 
-    def __init__(self, session, listName, url, verify_ssl, users, huge_tree, timeout, exclude_hidden_fields=False):
+    def __init__(self, session, listName, url, verify_ssl, users, huge_tree, timeout, exclude_hidden_fields=False ):
         self._session = session
         self.listName = listName
         self._url = url
