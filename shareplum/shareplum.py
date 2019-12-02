@@ -385,7 +385,18 @@ class _Documents(object):
             for child in xmlObj.findall("atom:entry/atom:content/meta:properties", ns):
                     name = child.find("dataservices:Name", ns).text
                     url = child.find("dataservices:ServerRelativeUrl", ns).text
-                    data.append({"fileName": name, "url": url})
+                    # i'm not sure are these fields are default or not
+                    created_at = child.find("dataservices:TimeCreated", ns)
+                    if created_at:
+                        created_at = created_at.text
+                    else:
+                        created_at = ''
+                    updated_at = child.find("dataservices:TimeLastModified", ns)
+                    if updated_at:
+                        updated_at = updated_at.text
+                    else:
+                        updated_at = ''
+                    data.append({"fileName": name, "url": url, "created_at": created_at, "updated_at": updated_at})
             return data
         else:
             return response

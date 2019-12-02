@@ -82,7 +82,7 @@ To download all files in a folder use the code below. Best if you save to an emp
 If you want to download all the sub folders and files in the sub folders while keeping the folder structure as it is in the root Share Point Document folder
 set the include_sub_folders=True like below. ::
 
-    docObj = site.Documents("Folder Name", include_sub_folders=True)
+    docObj.GetAllFilesInFolder("C:\Local\save\Folder", include_sub_folders=True)
 
 
 Can also get just one sub folder by the code below. ::
