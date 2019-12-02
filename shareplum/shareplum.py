@@ -387,12 +387,12 @@ class _Documents(object):
                     url = child.find("dataservices:ServerRelativeUrl", ns).text
                     # i'm not sure are these fields are default or not
                     created_at = child.find("dataservices:TimeCreated", ns)
-                    if created_at:
+                    if created_at is not None:
                         created_at = created_at.text
                     else:
                         created_at = ''
                     updated_at = child.find("dataservices:TimeLastModified", ns)
-                    if updated_at:
+                    if updated_at is not None:
                         updated_at = updated_at.text
                     else:
                         updated_at = ''
